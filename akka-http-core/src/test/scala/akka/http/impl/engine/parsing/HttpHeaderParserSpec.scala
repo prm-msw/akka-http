@@ -10,18 +10,19 @@ import akka.http.scaladsl.settings.ParserSettings
 import com.typesafe.config.{ Config, ConfigFactory }
 
 import scala.annotation.tailrec
-import scala.util.Random
+import scala.util.{ Random, Try }
 import org.scalatest.{ BeforeAndAfterAll, Matchers, WordSpec }
 import akka.util.ByteString
 import akka.actor.ActorSystem
-import akka.http.scaladsl.model.{ ErrorInfo, HttpHeader }
+import akka.http.scaladsl.model.{ ErrorInfo, HttpHeader, ParsingException }
 import akka.http.scaladsl.model.headers._
 import akka.http.impl.model.parser.CharacterClasses
 import akka.http.impl.util._
 import akka.http.scaladsl.settings.ParserSettings.IllegalResponseHeaderValueProcessingMode
 import akka.testkit.TestKit
+import org.scalatest.prop.Checkers
 
-abstract class HttpHeaderParserSpec(mode: String, newLine: String) extends WordSpec with Matchers with BeforeAndAfterAll {
+abstract class HttpHeaderParserSpec(mode: String, newLine: String) extends WordSpec with Matchers with BeforeAndAfterAll with Checkers {
 
   val testConf: Config = ConfigFactory.parseString("""
     akka.event-handlers = ["akka.testkit.TestEventListener"]
@@ -254,6 +255,23 @@ abstract class HttpHeaderParserSpec(mode: String, newLine: String) extends WordS
       parseAndCache(s"User-Agent: hmpf${newLine}x")(s"USER-AGENT: hmpf${newLine}x") shouldEqual RawHeader("User-Agent", "hmpf")
       parseAndCache(s"X-Forwarded-Host: localhost:8888${newLine}x")(s"X-FORWARDED-Host: localhost:8888${newLine}x") shouldEqual RawHeader("X-Forwarded-Host", "localhost:8888")
     }
+
+    "neatly reject invalid input" in {
+      val parserSettings = createParserSettings(system)
+      val parser = HttpHeaderParser(parserSettings, system.log)
+      check(
+        (bytes: Array[Byte]) ⇒
+          {
+            Try(parser.parseHeaderLine(ByteString(bytes), 0)())
+              .recover {
+                case _: ParsingException    ⇒ 0
+                case NotEnoughDataException ⇒ 0
+              }
+              .isSuccess
+          }
+      )
+    }
+
   }
 
   override def afterAll() = TestKit.shutdownActorSystem(system)
