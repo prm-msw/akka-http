@@ -11,6 +11,7 @@ import scala.concurrent.duration._
 import com.typesafe.config.{ Config, ConfigFactory }
 import akka.util.ByteString
 import akka.actor.ActorSystem
+import akka.http.impl.engine.parsing.BodyPartParser.{ BodyPartStart, ParseError, PartStart }
 import akka.stream.ActorMaterializer
 import akka.stream.scaladsl._
 import akka.stream.TLSProtocol._
@@ -19,6 +20,7 @@ import org.scalatest.{ BeforeAndAfterAll, FreeSpec, Matchers }
 import akka.http.scaladsl.settings.ParserSettings
 import akka.http.impl.engine.parsing.ParserOutput._
 import akka.http.impl.util._
+import akka.http.scaladsl.model.BodyPartEntity
 import akka.http.scaladsl.model.HttpEntity._
 import akka.http.scaladsl.model.HttpMethods._
 import akka.http.scaladsl.model.HttpProtocols._
@@ -36,7 +38,7 @@ abstract class RequestParserSpec(mode: String, newLine: String) extends FreeSpec
   val testConf: Config = ConfigFactory.parseString("""
     akka.event-handlers = ["akka.testkit.TestEventListener"]
     akka.loglevel = WARNING
-    akka.http.parsing.max-header-value-length = 32
+    akka.http.parsing.max-header-value-length = 64
     akka.http.parsing.max-uri-length = 40
     akka.http.parsing.max-content-length = 4000000000""")
   implicit val system = ActorSystem(getClass.getSimpleName, testConf)
@@ -46,6 +48,124 @@ abstract class RequestParserSpec(mode: String, newLine: String) extends FreeSpec
   implicit val materializer = ActorMaterializer()
 
   s"The request parsing logic should (mode: $mode)" - {
+    "properly parse a multipart request" - {
+      "with a single part" in new Test {
+        val contentLength = if (mode.equals("CRLF")) 26 else 22
+        s"""POST /foo HTTP/1.1
+          |Host: example.com
+          |Content-Type: multipart/mixed; boundary=-123
+          |Content-Length: $contentLength
+          |
+          |---123
+          |
+          |ABCD
+          |---123--
+          |""" should parseBodyPartsTo(HttpEntity("ABCD"))
+      }
+
+      "with two parts" in new Test {
+        val contentLength = if (mode.equals("CRLF")) 42 else 35
+        s"""POST /foo HTTP/1.1
+          |Host: example.com
+          |Content-Type: multipart/mixed; boundary=-123
+          |Content-Length: $contentLength
+          |
+          |---123
+          |
+          |ABCD
+          |---123
+          |
+          |EFGH
+          |---123--
+          |""" should parseBodyPartsTo(HttpEntity("ABCD"), HttpEntity("EFGH"))
+      }
+
+      "with a base64 encoded part" in new Test {
+        val contentLength = if (mode.equals("CRLF")) 65 else 60
+        s"""POST /foo HTTP/1.1
+           |Host: example.com
+           |Content-Type: multipart/mixed; boundary=-123
+           |Content-Length: $contentLength
+           |
+           |---123
+           |Content-Transfer-Encoding: base64
+           |
+           |SGVsbG8h
+           |---123--
+           |""" should parseBodyPartsTo(HttpEntity("Hello!"))
+      }
+
+      "with a quoted-printable encoded part" in new Test {
+        val contentLength = if (mode.equals("CRLF")) 95 else 90
+        s"""POST /foo HTTP/1.1
+          |Host: example.com
+          |Content-Type: multipart/mixed; boundary=-123
+          |Content-Length: $contentLength
+          |
+          |---123
+          |Content-Transfer-Encoding: quoted-printable
+          |
+          |this =3D _ =E2=87=92 that(_)
+          |---123--
+          |""" should parseBodyPartsTo(HttpEntity("this = _ ⇒ that(_)"))
+      }
+
+      "with a binary Content-Transfer-Encoding" in new Test {
+        val contentLength = if (mode.equals("CRLF")) 71 else 66
+        s"""POST /foo HTTP/1.1
+          |Host: example.com
+          |Content-Type: multipart/mixed; boundary=-123
+          |Content-Length: $contentLength
+          |
+          |---123
+          |Content-Transfer-Encoding: binary
+          |
+          |binary\\=3Ddata
+          |---123--
+          |""" should parseBodyPartsTo(HttpEntity("binary\\=3Ddata"))
+      }
+
+      "with a variety of Content-Transfer-Encoding headers" in new Test {
+        val contentLength = if (mode.equals("CRLF")) 519 else 495
+        s"""POST /foo HTTP/1.1
+          |Host: example.com
+          |Content-Type: multipart/mixed; boundary=-123
+          |Content-Length: $contentLength
+          |
+          |--123
+          |
+          |No Content-Transfer-Encoding header
+          |--123
+          |Content-Transfer-Encoding: 7bit
+          |
+          |7bit Content-Transfer-Encoding header
+          |--123
+          |Content-Transfer-Encoding: 8bit
+          |
+          |8bit Content-Transfer-Encoding header
+          |--123
+          |Content-Transfer-Encoding: binary
+          |
+          |Binary Content-Transfer-Encoding header
+          |--123
+          |Content-Transfer-Encoding: BASE64
+          |
+          |QkFTRTY0IENvbnRlbnQtVHJhbnNmZXItRW5jb2RpbmcgaGVhZGVy
+          |--123
+          |Content-Transfer-Encoding: quoted-printable
+          |
+          |Quoted-printable Content-Transfer-Encoding header =F0=9F=98=8A
+          |---123--
+          |""" should parseBodyPartsTo(
+          HttpEntity("No Content-Transfer-Encoding header"),
+          HttpEntity("7bit Content-Transfer-Encoding header"),
+          HttpEntity("8bit Content-Transfer-Encoding header"),
+          HttpEntity("Binary Content-Transfer-Encoding header"),
+          HttpEntity("BASE64 Content-Transfer-Encoding header"),
+          HttpEntity("Quoted-printable Content-Transfer-Encoding header \uD83D\uDE0A"))
+      }
+    }
+
     "properly parse a request" - {
       "with no headers and no body" in new Test {
         """GET / HTTP/1.0
@@ -489,9 +609,9 @@ abstract class RequestParserSpec(mode: String, newLine: String) extends FreeSpec
 
       "with a too-long header-value" in new Test {
         """|GET / HTTP/1.1
-          |Fancy: 123456789012345678901234567890123""" should parseToError(
+          |Fancy: 123456789012345678901234567890123xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx""" should parseToError(
           RequestHeaderFieldsTooLarge,
-          ErrorInfo("HTTP header value exceeds the configured limit of 32 characters"))
+          ErrorInfo("HTTP header value exceeds the configured limit of 64 characters"))
       }
 
       "with an invalid Content-Length header value" in new Test {
@@ -540,7 +660,11 @@ abstract class RequestParserSpec(mode: String, newLine: String) extends FreeSpec
     def awaitAtMost: FiniteDuration = 3.seconds.dilated
     var closeAfterResponseCompletion = Seq.empty[Boolean]
 
-    class StrictEqualHttpRequest(val req: HttpRequest) {
+    /**
+     * This class wraps a {@link akka.http.scaladsl.model.HttpRequest} and provides the 'equals' method to compare
+     * it to another HttpRequest
+     */
+    case class StrictEqualHttpRequest(req: HttpRequest) {
       override def equals(other: scala.Any): Boolean = other match {
         case other: StrictEqualHttpRequest ⇒
           this.req.copy(entity = HttpEntity.Empty) == other.req.copy(entity = HttpEntity.Empty) &&
@@ -550,6 +674,24 @@ abstract class RequestParserSpec(mode: String, newLine: String) extends FreeSpec
 
       override def toString = req.toString
     }
+
+    /**
+     * This class wraps a {@link akka.http.scaladsl.model.bodyPartEntity} and provides the 'equals' method to compare
+     * it to another bodyPartEntity.
+     */
+    case class StrictEqualBodyPartEntity(bodyPart: BodyPartEntity) {
+      override def equals(other: scala.Any): Boolean = other match {
+        case other: StrictEqualBodyPartEntity ⇒
+          this.bodyPart.toStrict(awaitAtMost).awaitResult(awaitAtMost) ==
+            other.bodyPart.toStrict(awaitAtMost).awaitResult(awaitAtMost)
+        case _ ⇒ false
+      }
+
+      override def toString = bodyPart.toString
+    }
+
+    def strictBodyPartEqualify[T](x: Either[T, BodyPartEntity]): Either[T, StrictEqualBodyPartEntity] =
+      x.right.map(new StrictEqualBodyPartEntity(_))
 
     def strictEqualify[T](x: Either[T, HttpRequest]): Either[T, StrictEqualHttpRequest] =
       x.right.map(new StrictEqualHttpRequest(_))
@@ -579,6 +721,58 @@ abstract class RequestParserSpec(mode: String, newLine: String) extends FreeSpec
       expected: Either[RequestOutput, HttpRequest]*): Matcher[Seq[String]] =
       equal(expected.map(strictEqualify))
         .matcher[Seq[Either[RequestOutput, StrictEqualHttpRequest]]] compose multiParse(parser)
+
+    def parseBodyPartsTo(expected: BodyPartEntity*): Matcher[String] = {
+      multiParseBodyPartsTo(expected.map(Right(_)): _*).compose(_ :: Nil)
+    }
+
+    def multiParseBodyPartsTo(expected: Either[BodyPartParser.Output, BodyPartEntity]*): Matcher[Seq[String]] = {
+      equal(expected.map(strictBodyPartEqualify))
+        .matcher[Seq[Either[BodyPartParser.Output, StrictEqualBodyPartEntity]]] compose entityBodyParse compose (_ map prep)
+    }
+
+    /**
+     * Parses a multipart http request into its constituent BodyPartEntities, using BodyPartParser
+     * @param input Should be only the HTTP request body (without headers)
+     * @return
+     */
+    def entityBodyParse(input: Seq[String]): Seq[Either[BodyPartParser.Output, StrictEqualBodyPartEntity]] = {
+      def defaultContentType: ContentType = ContentTypes.`text/plain(UTF-8)`
+      // First parse the input into HttpRequests
+      multiParse(newParser)(input)
+        // Extract the entity bodies
+        .map {
+          case Right(StrictEqualHttpRequest(request)) ⇒ request.entity
+        }
+        .map(entity ⇒ {
+          // Create the parser for parsing this entity body, getting the boundary from the original request headers
+          val parser = new BodyPartParser(
+            defaultContentType,
+            entity.contentType.mediaType.params("boundary"),
+            system.log,
+            parserSettings)
+
+          // Pass the entity body and the parser to the next processing step
+          (entity.dataBytes, parser)
+        })
+        .flatMap {
+          case (data: Source[ByteString, Any], parser: BodyPartParser) ⇒
+            data.via(parser).named("parser")
+              .splitWhen(x ⇒ x.isInstanceOf[PartStart] || x.isInstanceOf[ParseError])
+              .prefixAndTail(1)
+              .collect {
+                case (Seq(BodyPartStart(headers, createEntity)), entityParts) ⇒
+                  Right(createEntity(entityParts))
+                case (Seq(x @ (ParseError(errorInfo))), rest) ⇒
+                  rest.runWith(Sink.cancelled)
+                  Left(x)
+              }
+              .concatSubstreams
+              .map(strictBodyPartEqualify)
+              .limit(10000).runWith(Sink.seq)
+              .awaitResult(awaitAtMost)
+        }
+    }
 
     def multiParse(parser: HttpRequestParser)(input: Seq[String]): Seq[Either[RequestOutput, StrictEqualHttpRequest]] =
       Source(input.toList)
