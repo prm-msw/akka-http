@@ -126,32 +126,32 @@ abstract class RequestParserSpec(mode: String, newLine: String) extends FreeSpec
       }
 
       "with a variety of Content-Transfer-Encoding headers" in new Test {
-        val contentLength = if (mode.equals("CRLF")) 519 else 495
+        val contentLength = if (mode.equals("CRLF")) 525 else 501
         s"""POST /foo HTTP/1.1
           |Host: example.com
           |Content-Type: multipart/mixed; boundary=-123
           |Content-Length: $contentLength
           |
-          |--123
+          |---123
           |
           |No Content-Transfer-Encoding header
-          |--123
+          |---123
           |Content-Transfer-Encoding: 7bit
           |
           |7bit Content-Transfer-Encoding header
-          |--123
+          |---123
           |Content-Transfer-Encoding: 8bit
           |
           |8bit Content-Transfer-Encoding header
-          |--123
+          |---123
           |Content-Transfer-Encoding: binary
           |
           |Binary Content-Transfer-Encoding header
-          |--123
+          |---123
           |Content-Transfer-Encoding: BASE64
           |
           |QkFTRTY0IENvbnRlbnQtVHJhbnNmZXItRW5jb2RpbmcgaGVhZGVy
-          |--123
+          |---123
           |Content-Transfer-Encoding: quoted-printable
           |
           |Quoted-printable Content-Transfer-Encoding header =F0=9F=98=8A

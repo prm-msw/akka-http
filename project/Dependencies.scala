@@ -54,6 +54,8 @@ object Dependencies {
     val caffeine    = "com.github.ben-manes.caffeine" % "caffeine"                     % "2.6.2"
     val jsr305      = "com.google.code.findbugs"      % "jsr305"                       % "3.0.2"             % Provided // ApacheV2
 
+    val commonsCodec = "commons-codec"               % "commons-codec"                % "1.11"     // ApacheV2
+
     object Docs {
       val sprayJson   = Compile.sprayJson                                                                    % "test"
       val gson        = "com.google.code.gson"             % "gson"                    % "2.8.3"             % "test"
@@ -87,6 +89,7 @@ object Dependencies {
   )
 
   lazy val httpCore = l ++= Seq(
+    commonsCodec,
     Test.sprayJson, // for WS Autobahn test metadata
     Test.scalatest.value, Test.scalacheck.value, Test.junit)
 

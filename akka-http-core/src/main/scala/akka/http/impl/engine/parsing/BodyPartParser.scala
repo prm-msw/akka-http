@@ -17,6 +17,8 @@ import akka.http.scaladsl.model._
 import akka.http.impl.util._
 import akka.stream.{ Attributes, FlowShape, Inlet, Outlet }
 import headers._
+import org.apache.commons.codec.binary.Base64
+import org.apache.commons.codec.net.QuotedPrintableCodec
 
 import scala.collection.mutable.ListBuffer
 
@@ -187,19 +189,39 @@ private[http] final class BodyPartParser(
                               cth: Option[`Content-Type`])(input: ByteString, lineStart: Int): StateResult =
         parseHeaderLines(input, lineStart, headers, headerCount, cth)
 
+      /**
+       * Decode the body part according to the encoding specified in the content-transfer-encoding header, if it
+       * exists. See RFC 2045 section 6.
+       *
+       * @param headers
+       * @param bytes
+       * @return
+       */
+      def decodeIfNeeded(headers: List[HttpHeader], bytes: ByteString): ByteString = {
+        headers.find(_.name.equalsIgnoreCase("content-transfer-encoding")) match {
+          case Some(header) ⇒ {
+            if (header.value.equalsIgnoreCase("base64")) ByteString(Base64.decodeBase64(bytes.toArray))
+            else if (header.value.equalsIgnoreCase("quoted-printable"))
+              ByteString(QuotedPrintableCodec.decodeQuotedPrintable(bytes.toArray))
+            else bytes
+          }
+          case None ⇒ bytes
+        }
+      }
+
       def parseEntity(headers: List[HttpHeader], contentType: ContentType,
                       emitPartChunk: (List[HttpHeader], ContentType, ByteString) ⇒ Unit = {
                         (headers, ct, bytes) ⇒
                           emit(BodyPartStart(headers, entityParts ⇒ HttpEntity.IndefiniteLength(
                             ct,
                             entityParts.collect { case EntityPart(data) ⇒ data })))
-                          emit(bytes)
+                          emit(decodeIfNeeded(headers, bytes))
                       },
                       emitFinalPartChunk: (List[HttpHeader], ContentType, ByteString) ⇒ Unit = {
                         (headers, ct, bytes) ⇒
                           emit(BodyPartStart(headers, { rest ⇒
                             StreamUtils.cancelSource(rest)(materializer)
-                            HttpEntity.Strict(ct, bytes)
+                            HttpEntity.Strict(ct, decodeIfNeeded(headers, bytes))
                           }))
                       })(input: ByteString, offset: Int): StateResult =
         try {
@@ -225,7 +247,8 @@ private[http] final class BodyPartParser(
             val emitEnd = input.length - eolConfiguration.needle.length - eolConfiguration.eolLength
             if (emitEnd > offset) {
               emitPartChunk(headers, contentType, input.slice(offset, emitEnd))
-              val simpleEmit: (List[HttpHeader], ContentType, ByteString) ⇒ Unit = (_, _, bytes) ⇒ emit(bytes)
+              val simpleEmit: (List[HttpHeader], ContentType, ByteString) ⇒ Unit =
+                (headers, _, bytes) ⇒ emit(decodeIfNeeded(headers, bytes))
               continue(input drop emitEnd, 0)(parseEntity(null, null, simpleEmit, simpleEmit))
             } else continue(input, offset)(parseEntity(headers, contentType, emitPartChunk, emitFinalPartChunk))
         }
