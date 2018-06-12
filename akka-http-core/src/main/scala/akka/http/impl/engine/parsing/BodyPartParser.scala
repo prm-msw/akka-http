@@ -198,7 +198,8 @@ private[http] final class BodyPartParser(
        * @return
        */
       def decodeIfNeeded(headers: List[HttpHeader], bytes: ByteString): ByteString = {
-        headers.find(_.name.equalsIgnoreCase("content-transfer-encoding")) match {
+        if (headers == null) bytes
+        else headers.find(_.name.equalsIgnoreCase("content-transfer-encoding")) match {
           case Some(header) ⇒ {
             if (header.value.equalsIgnoreCase("base64")) ByteString(Base64.decodeBase64(bytes.toArray))
             else if (header.value.equalsIgnoreCase("quoted-printable"))
