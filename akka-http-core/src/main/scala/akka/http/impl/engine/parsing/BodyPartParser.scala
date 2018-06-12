@@ -173,9 +173,13 @@ private[http] final class BodyPartParser(
           case EmptyHeader ⇒ parseEntity(headers.toList, contentType, cte)(input, lineEnd)
 
           case h: `Content-Transfer-Encoding` ⇒
-
-            if (cte.isEmpty) parseHeaderLines(input, lineEnd, headers, headerCount + 1, cth, Some(h.encoding))
-            else if (cte.get.equalsIgnoreCase(h.encoding)) parseHeaderLines(input, lineEnd, headers, headerCount, cth, cte)
+            if (cte.isEmpty) {
+              // If the Content-Transfer-Encoding begins with 'x-', it is a custom value and should be passed through
+              // to the client application.
+              if (h.encoding.toLowerCase().startsWith("x-"))
+                parseHeaderLines(input, lineEnd, headers += h, headerCount + 1, cth, Some(h.encoding))
+              else parseHeaderLines(input, lineEnd, headers, headerCount + 1, cth, Some(h.encoding))
+            } else if (cte.get.equalsIgnoreCase(h.encoding)) parseHeaderLines(input, lineEnd, headers, headerCount, cth, cte)
             else fail("multipart part must not contain more than one Content-Transfer-Encoding header")
 
           case h: `Content-Type` ⇒
