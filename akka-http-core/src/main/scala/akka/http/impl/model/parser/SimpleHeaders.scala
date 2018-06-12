@@ -96,6 +96,16 @@ private[parser] trait SimpleHeaders { this: Parser with CommonRules with CommonA
     (`byte-content-range` | `other-content-range`) ~ EOI ~> (`Content-Range`(_, _))
   }
 
+  // http://www.ietf.org/rfc/rfc2045#section-6.1
+  def contentTransferEncoding = rule {
+    ignoreCase("7bit") | ignoreCase("8bit") | ignoreCase("binary") | ignoreCase("quoted-printable") |
+      ignoreCase("base64") | (ignoreCase("X-") ~ token0)
+  }
+
+  def `content-transfer-encoding` = rule {
+    capture(contentTransferEncoding) ~ OWS ~ EOI ~> (`Content-Transfer-Encoding`(_))
+  }
+
   // https://tools.ietf.org/html/rfc6265#section-4.2
   def `cookie` = rule {
     oneOrMore(`optional-cookie-pair`).separatedBy(';' ~ OWS) ~ EOI ~> { pairs ⇒

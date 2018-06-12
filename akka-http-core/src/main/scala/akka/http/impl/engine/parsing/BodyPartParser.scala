@@ -19,7 +19,6 @@ import akka.stream.{ Attributes, FlowShape, Inlet, Outlet }
 import headers._
 import org.apache.commons.codec.binary.Base64
 import org.apache.commons.codec.net.QuotedPrintableCodec
-import akka.http.javadsl.{ model ⇒ jm }
 
 import scala.collection.mutable.ListBuffer
 
@@ -173,9 +172,10 @@ private[http] final class BodyPartParser(
 
           case EmptyHeader ⇒ parseEntity(headers.toList, contentType, cte)(input, lineEnd)
 
-          case ContentTransferEncodingHeader(value) ⇒
-            if (cte.isEmpty) parseHeaderLines(input, lineEnd, headers, headerCount + 1, cth, Some(value))
-            else if (cte.get.equalsIgnoreCase(value)) parseHeaderLines(input, lineEnd, headers, headerCount, cth, cte)
+          case h: `Content-Transfer-Encoding` ⇒
+
+            if (cte.isEmpty) parseHeaderLines(input, lineEnd, headers, headerCount + 1, cth, Some(h.encoding))
+            else if (cte.get.equalsIgnoreCase(h.encoding)) parseHeaderLines(input, lineEnd, headers, headerCount, cth, cte)
             else fail("multipart part must not contain more than one Content-Transfer-Encoding header")
 
           case h: `Content-Type` ⇒
@@ -310,21 +310,6 @@ private[http] object BodyPartParser {
     def value = ""
     def render[R <: Rendering](r: R): r.type = r
     override def toString = "BoundaryHeader"
-  }
-
-  private class ContentTransferEncodingHeader(v: String) extends jm.headers.RawHeader {
-    def value = v
-    def renderInRequests = true
-    def renderInResponses = true
-    def name = "Content-Transfer-Encoding"
-    def lowercaseName = "content-transfer-encoding"
-    def render[R <: Rendering](r: R): r.type = r ~~ "Content-Transfer-Encoding: " ~~ value
-  }
-
-  private object ContentTransferEncodingHeader {
-    def unapply[H <: HttpHeader](someHeader: H): Option[String] =
-      if (someHeader.lowercaseName.equals("content-transfer-encoding")) Some(someHeader.value)
-      else None
   }
 
   sealed trait Output

@@ -148,6 +148,7 @@ private[http] object HeaderParser {
     "content-encoding",
     "content-length",
     "content-range",
+    "content-transfer-encoding",
     "content-type",
     "cookie",
     "date",

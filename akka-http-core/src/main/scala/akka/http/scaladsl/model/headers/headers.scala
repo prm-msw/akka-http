@@ -432,6 +432,12 @@ final case class `Content-Range`(rangeUnit: RangeUnit, contentRange: ContentRang
   protected def companion = `Content-Range`
 }
 
+object `Content-Transfer-Encoding` extends ModeledCompanion[`Content-Transfer-Encoding`]
+final case class `Content-Transfer-Encoding`(encoding: String) extends jm.headers.ContentTransferEncoding with RequestHeader {
+  def renderValue[R <: Rendering](r: R): r.type = r ~~ encoding
+  protected def companion = `Content-Transfer-Encoding`
+}
+
 // http://tools.ietf.org/html/rfc7231#section-3.1.1.5
 object `Content-Type` extends ModeledCompanion[`Content-Type`]
 /**
