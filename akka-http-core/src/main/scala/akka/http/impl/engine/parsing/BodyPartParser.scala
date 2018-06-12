@@ -19,6 +19,7 @@ import akka.stream.{ Attributes, FlowShape, Inlet, Outlet }
 import headers._
 import org.apache.commons.codec.binary.Base64
 import org.apache.commons.codec.net.QuotedPrintableCodec
+import akka.http.javadsl.{ model ⇒ jm }
 
 import scala.collection.mutable.ListBuffer
 
@@ -143,7 +144,7 @@ private[http] final class BodyPartParser(
         }
 
       @tailrec def parseHeaderLines(input: ByteString, lineStart: Int, headers: ListBuffer[HttpHeader] = ListBuffer[HttpHeader](),
-                                    headerCount: Int = 0, cth: Option[`Content-Type`] = None): StateResult = {
+                                    headerCount: Int = 0, cth: Option[`Content-Type`] = None, cte: Option[String] = None): StateResult = {
         def contentType =
           cth match {
             case Some(x) ⇒ x.contentType
@@ -161,7 +162,7 @@ private[http] final class BodyPartParser(
             case NotEnoughDataException ⇒ null
           }
         resultHeader match {
-          case null ⇒ continue(input, lineStart)(parseHeaderLinesAux(headers, headerCount, cth))
+          case null ⇒ continue(input, lineStart)(parseHeaderLinesAux(headers, headerCount, cth, cte))
 
           case BoundaryHeader ⇒
             emit(BodyPartStart(headers.toList, _ ⇒ HttpEntity.empty(contentType)))
@@ -170,15 +171,20 @@ private[http] final class BodyPartParser(
             else if (doubleDash(input, ix)) setShouldTerminate()
             else fail("Illegal multipart boundary in message content")
 
-          case EmptyHeader ⇒ parseEntity(headers.toList, contentType)(input, lineEnd)
+          case EmptyHeader ⇒ parseEntity(headers.toList, contentType, cte)(input, lineEnd)
+
+          case ContentTransferEncodingHeader(value) ⇒
+            if (cte.isEmpty) parseHeaderLines(input, lineEnd, headers, headerCount + 1, cth, Some(value))
+            else if (cte.get.equalsIgnoreCase(value)) parseHeaderLines(input, lineEnd, headers, headerCount, cth, cte)
+            else fail("multipart part must not contain more than one Content-Transfer-Encoding header")
 
           case h: `Content-Type` ⇒
-            if (cth.isEmpty) parseHeaderLines(input, lineEnd, headers, headerCount + 1, Some(h))
-            else if (cth.get == h) parseHeaderLines(input, lineEnd, headers, headerCount, cth)
+            if (cth.isEmpty) parseHeaderLines(input, lineEnd, headers, headerCount + 1, Some(h), cte)
+            else if (cth.get == h) parseHeaderLines(input, lineEnd, headers, headerCount, cth, cte)
             else fail("multipart part must not contain more than one Content-Type header")
 
           case h if headerCount < maxHeaderCount ⇒
-            parseHeaderLines(input, lineEnd, headers += h, headerCount + 1, cth)
+            parseHeaderLines(input, lineEnd, headers += h, headerCount + 1, cth, cte)
 
           case _ ⇒ fail(s"multipart part contains more than the configured limit of $maxHeaderCount headers")
         }
@@ -186,23 +192,22 @@ private[http] final class BodyPartParser(
 
       // work-around for compiler complaining about non-tail-recursion if we inline this method
       def parseHeaderLinesAux(headers: ListBuffer[HttpHeader], headerCount: Int,
-                              cth: Option[`Content-Type`])(input: ByteString, lineStart: Int): StateResult =
-        parseHeaderLines(input, lineStart, headers, headerCount, cth)
+                              cth: Option[`Content-Type`], cte: Option[String])(input: ByteString, lineStart: Int): StateResult =
+        parseHeaderLines(input, lineStart, headers, headerCount, cth, cte)
 
       /**
        * Decode the body part according to the encoding specified in the content-transfer-encoding header, if it
        * exists. See RFC 2045 section 6.
        *
-       * @param headers
+       * @param contentTransferEncoding
        * @param bytes
        * @return
        */
-      def decodeIfNeeded(headers: List[HttpHeader], bytes: ByteString): ByteString = {
-        if (headers == null) bytes
-        else headers.find(_.name.equalsIgnoreCase("content-transfer-encoding")) match {
-          case Some(header) ⇒ {
-            if (header.value.equalsIgnoreCase("base64")) ByteString(Base64.decodeBase64(bytes.toArray))
-            else if (header.value.equalsIgnoreCase("quoted-printable"))
+      def decodeIfNeeded(contentTransferEncoding: Option[String], bytes: ByteString): ByteString = {
+        contentTransferEncoding match {
+          case Some(cte) ⇒ {
+            if (cte.equalsIgnoreCase("base64")) ByteString(Base64.decodeBase64(bytes.toArray))
+            else if (cte.equalsIgnoreCase("quoted-printable"))
               ByteString(QuotedPrintableCodec.decodeQuotedPrintable(bytes.toArray))
             else bytes
           }
@@ -210,25 +215,25 @@ private[http] final class BodyPartParser(
         }
       }
 
-      def parseEntity(headers: List[HttpHeader], contentType: ContentType,
-                      emitPartChunk: (List[HttpHeader], ContentType, ByteString) ⇒ Unit = {
-                        (headers, ct, bytes) ⇒
+      def parseEntity(headers: List[HttpHeader], contentType: ContentType, contentTransferEncoding: Option[String],
+                      emitPartChunk: (List[HttpHeader], ContentType, Option[String], ByteString) ⇒ Unit = {
+                        (headers, ct, cte, bytes) ⇒
                           emit(BodyPartStart(headers, entityParts ⇒ HttpEntity.IndefiniteLength(
                             ct,
                             entityParts.collect { case EntityPart(data) ⇒ data })))
-                          emit(decodeIfNeeded(headers, bytes))
+                          emit(decodeIfNeeded(cte, bytes))
                       },
-                      emitFinalPartChunk: (List[HttpHeader], ContentType, ByteString) ⇒ Unit = {
-                        (headers, ct, bytes) ⇒
+                      emitFinalPartChunk: (List[HttpHeader], ContentType, Option[String], ByteString) ⇒ Unit = {
+                        (headers, ct, cte, bytes) ⇒
                           emit(BodyPartStart(headers, { rest ⇒
                             StreamUtils.cancelSource(rest)(materializer)
-                            HttpEntity.Strict(ct, decodeIfNeeded(headers, bytes))
+                            HttpEntity.Strict(ct, decodeIfNeeded(cte, bytes))
                           }))
                       })(input: ByteString, offset: Int): StateResult =
         try {
           @tailrec def rec(index: Int): StateResult = {
             val currentPartEnd = eolConfiguration.boyerMoore.nextIndex(input, index)
-            def emitFinalChunk() = emitFinalPartChunk(headers, contentType, input.slice(offset, currentPartEnd))
+            def emitFinalChunk() = emitFinalPartChunk(headers, contentType, contentTransferEncoding, input.slice(offset, currentPartEnd))
             val needleEnd = currentPartEnd + eolConfiguration.needle.length
             if (eolConfiguration.isEndOfLine(input, needleEnd)) {
               emitFinalChunk()
@@ -247,11 +252,11 @@ private[http] final class BodyPartParser(
             // we cannot emit all input bytes since the end of the input might be the start of the next boundary
             val emitEnd = input.length - eolConfiguration.needle.length - eolConfiguration.eolLength
             if (emitEnd > offset) {
-              emitPartChunk(headers, contentType, input.slice(offset, emitEnd))
-              val simpleEmit: (List[HttpHeader], ContentType, ByteString) ⇒ Unit =
-                (headers, _, bytes) ⇒ emit(decodeIfNeeded(headers, bytes))
-              continue(input drop emitEnd, 0)(parseEntity(null, null, simpleEmit, simpleEmit))
-            } else continue(input, offset)(parseEntity(headers, contentType, emitPartChunk, emitFinalPartChunk))
+              emitPartChunk(headers, contentType, contentTransferEncoding, input.slice(offset, emitEnd))
+              val simpleEmit: (List[HttpHeader], ContentType, Option[String], ByteString) ⇒ Unit =
+                (_, _, cte, bytes) ⇒ emit(decodeIfNeeded(cte, bytes))
+              continue(input drop emitEnd, 0)(parseEntity(null, null, None, simpleEmit, simpleEmit))
+            } else continue(input, offset)(parseEntity(headers, contentType, contentTransferEncoding, emitPartChunk, emitFinalPartChunk))
         }
 
       def emit(bytes: ByteString): Unit = if (bytes.nonEmpty) emit(EntityPart(bytes))
@@ -305,6 +310,21 @@ private[http] object BodyPartParser {
     def value = ""
     def render[R <: Rendering](r: R): r.type = r
     override def toString = "BoundaryHeader"
+  }
+
+  private class ContentTransferEncodingHeader(v: String) extends jm.headers.RawHeader {
+    def value = v
+    def renderInRequests = true
+    def renderInResponses = true
+    def name = "Content-Transfer-Encoding"
+    def lowercaseName = "content-transfer-encoding"
+    def render[R <: Rendering](r: R): r.type = r ~~ "Content-Transfer-Encoding: " ~~ value
+  }
+
+  private object ContentTransferEncodingHeader {
+    def unapply[H <: HttpHeader](someHeader: H): Option[String] =
+      if (someHeader.lowercaseName.equals("content-transfer-encoding")) Some(someHeader.value)
+      else None
   }
 
   sealed trait Output

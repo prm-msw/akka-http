@@ -104,7 +104,7 @@ trait MultipartUnmarshallersSpec extends FreeSpec with Matchers with BeforeAndAf
           Multipart.General.BodyPart.Strict(HttpEntity(ContentTypes.`text/plain(UTF-8)`, s"first part, with a trailing newline${lineFeed}")),
           Multipart.General.BodyPart.Strict(
             HttpEntity(`application/octet-stream`, ByteString("filecontent")),
-            List(RawHeader("Content-Transfer-Encoding", "binary"))))
+            List()))
       }
       "illegal headers" in (
         Unmarshal(HttpEntity(
@@ -181,6 +181,19 @@ trait MultipartUnmarshallersSpec extends FreeSpec with Matchers with BeforeAndAf
           .flatMap(_.toStrict(1.second.dilated))
           .awaitResult(5.second.dilated)
           .strictParts.size shouldBe num
+      }
+    }
+
+    "multipartGeneralUnmarshaller should support the content-transfer-encoding with" - {
+      "a base64 encoded part" in {
+        Unmarshal(HttpEntity(
+          `multipart/mixed` withBoundary "XYZABC",
+          ByteString("""--XYZABC
+                       |Content-Transfer-Encoding: base64
+                       |
+                       |SGVsbG8h
+                       |--XYZABC--""".stripMarginWithNewline(lineFeed)))).to[Multipart.General] should haveParts(
+          Multipart.General.BodyPart.Strict(HttpEntity(ContentTypes.`text/plain(UTF-8)`, "Hello!")))
       }
     }
 
@@ -336,7 +349,6 @@ trait MultipartUnmarshallersSpec extends FreeSpec with Matchers with BeforeAndAf
           Multipart.FormData.BodyPart.Strict("email", HttpEntity(`application/octet-stream`, ByteString("test@there.com"))),
           Multipart.FormData.BodyPart.Strict("userfile", HttpEntity(`application/pdf`, ByteString("filecontent")), Map("filename" → "test€.dat"),
             List(
-              RawHeader("Content-Transfer-Encoding", "binary"),
               RawHeader("Content-Additional-1", "anything"),
               RawHeader("Content-Additional-2", "really-anything")))) // verifies order of headers is preserved
       }
